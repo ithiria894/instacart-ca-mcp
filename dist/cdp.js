@@ -11,7 +11,9 @@
  *   google-chrome --remote-debugging-port=9222 --user-data-dir=~/.instacart-ca-mcp/chrome
  * then log in to instacart.ca once in that window.
  */
-import CDP from "chrome-remote-interface";
+// chrome-remote-interface ships no types; treat as any.
+import CDPImport from "chrome-remote-interface";
+const CDP = CDPImport;
 const DEBUG_PORT = Number(process.env.INSTACART_CDP_PORT || 9222);
 const DEBUG_HOST = process.env.INSTACART_CDP_HOST || "127.0.0.1";
 function log(...args) {
@@ -56,6 +58,20 @@ export async function evalInInstacartPage(fnBody) {
             client = await CDP({ host: DEBUG_HOST, port: DEBUG_PORT, target: targetId });
         }
         await client.Runtime.enable();
+        await client.Page.enable();
+        // Guarantee the tab is actually on an instacart.ca origin, otherwise a
+        // relative fetch('/graphql') would hit the wrong site and return nothing.
+        const { result: urlRes } = await client.Runtime.evaluate({
+            expression: "location.href",
+            returnByValue: true,
+        });
+        const currentUrl = String(urlRes?.value || "");
+        if (!currentUrl.includes("instacart.ca")) {
+            log(`Tab is on ${currentUrl}; navigating to instacart.ca`);
+            await client.Page.navigate({ url: "https://www.instacart.ca/store" });
+            await client.Page.loadEventFired();
+            await new Promise((r) => setTimeout(r, 3500));
+        }
         const expression = `(async () => { ${fnBody} })()`;
         const { result, exceptionDetails } = await client.Runtime.evaluate({
             expression,
