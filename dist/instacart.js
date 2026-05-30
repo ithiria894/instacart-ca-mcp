@@ -47,9 +47,11 @@ export async function searchStore(shopId, query, first = 8) {
       "&extensions=" + encodeURIComponent(JSON.stringify(ext));
     const r = await fetch(url, { credentials: "include", headers: { accept: "application/json" } });
     if (r.status !== 200) return { ok: false, error: "HTTP " + r.status, products: [] };
-    const j = await r.json();
-    if (j.errors) return { ok: false, error: JSON.stringify(j.errors).slice(0,200), products: [] };
-    const s = JSON.stringify(j);
+    // Use raw text (not r.json()) — proven-working parse path.
+    const s = await r.text();
+    if (s.indexOf('"errors"') !== -1 && s.indexOf('"data"') === -1) {
+      return { ok: false, error: s.slice(0, 200), products: [] };
+    }
     // Pair each product name with the nearest following price string.
     const UI = /^(bodymedium|small_currency|dollar|cents|body|caption|title|subtitle|heading|label)/i;
     const re = /"name":"([^"]{4,80})"/g;
