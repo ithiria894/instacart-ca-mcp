@@ -34,9 +34,17 @@ function readCookieString() {
 }
 /** Parse a raw "k=v; k2=v2" Cookie header into Playwright cookie objects. */
 function parseCookies(raw) {
-    const url = "https://www.instacart.ca/";
+    // The session cookie (__Host-instacart_sid) is a *session* cookie in the
+    // browser — no Expires — so a persistent context would drop it on close and
+    // the next headless launch would be a guest again. Force a far-future expiry
+    // so Chromium writes every cookie to the profile's cookie store on disk.
+    const oneYear = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
+    // __Host- cookies must be Secure, path "/", and have NO domain attribute, so
+    // they have to be added by URL. Everything else we pin to the .instacart.ca
+    // domain so it survives across www / store subpaths.
+    const cleaned = raw.replace(/^\s*cookie:\s*/i, "");
     const cookies = [];
-    for (const part of raw.split(/;\s*/)) {
+    for (const part of cleaned.split(/;\s*/)) {
         const eq = part.indexOf("=");
         if (eq <= 0)
             continue;
@@ -44,7 +52,13 @@ function parseCookies(raw) {
         const value = part.slice(eq + 1).trim();
         if (!name)
             continue;
-        cookies.push({ name, value, url });
+        const base = { name, value, expires: oneYear };
+        if (name.startsWith("__Host-")) {
+            cookies.push({ ...base, url: "https://www.instacart.ca/", path: "/", secure: true });
+        }
+        else {
+            cookies.push({ ...base, domain: ".instacart.ca", path: "/", secure: true });
+        }
     }
     return cookies;
 }

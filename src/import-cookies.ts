@@ -38,15 +38,32 @@ function readCookieString(): string {
 
 /** Parse a raw "k=v; k2=v2" Cookie header into Playwright cookie objects. */
 function parseCookies(raw: string) {
-  const url = "https://www.instacart.ca/";
-  const cookies: Array<{ name: string; value: string; url: string }> = [];
-  for (const part of raw.split(/;\s*/)) {
+  // The session cookie (__Host-instacart_sid) is a *session* cookie in the
+  // browser — no Expires — so a persistent context would drop it on close and
+  // the next headless launch would be a guest again. Force a far-future expiry
+  // so Chromium writes every cookie to the profile's cookie store on disk.
+  const oneYear = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
+  // __Host- cookies must be Secure, path "/", and have NO domain attribute, so
+  // they have to be added by URL. Everything else we pin to the .instacart.ca
+  // domain so it survives across www / store subpaths.
+  const cleaned = raw.replace(/^\s*cookie:\s*/i, "");
+  type PWCookie = {
+    name: string; value: string; expires: number; path: string; secure: boolean;
+    url?: string; domain?: string;
+  };
+  const cookies: PWCookie[] = [];
+  for (const part of cleaned.split(/;\s*/)) {
     const eq = part.indexOf("=");
     if (eq <= 0) continue;
     const name = part.slice(0, eq).trim();
     const value = part.slice(eq + 1).trim();
     if (!name) continue;
-    cookies.push({ name, value, url });
+    const base: Record<string, unknown> = { name, value, expires: oneYear };
+    if (name.startsWith("__Host-")) {
+      cookies.push({ ...base, url: "https://www.instacart.ca/", path: "/", secure: true });
+    } else {
+      cookies.push({ ...base, domain: ".instacart.ca", path: "/", secure: true });
+    }
   }
   return cookies;
 }
