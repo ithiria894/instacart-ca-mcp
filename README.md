@@ -2,6 +2,10 @@
 
 An MCP server for **Instacart Canada** (`instacart.ca`). Ask your AI assistant to search products, browse categories, and compare prices across every store in your delivery zone — no clicking through the website, no API key.
 
+<p align="center">
+  <img src="assets/instacart-ca-mcp-demo.gif" width="680" alt="Demo: you ask 'compare ground beef across stores', the assistant calls instacart_compare and returns a cheapest-first table — Walmart $6.27 (markup), Save-On $8.50 (real shelf price), Superstore, T&T, Costco — then a 3-step get-started guide.">
+</p>
+
 *(中文版喺下面 / Cantonese version below.)*
 
 > ⚠️ **Unofficial.** This drives Instacart's *internal* web GraphQL API the same way the website does, from inside your own logged-in browser session. It can break any time Instacart changes their frontend. Built for personal use. Respect Instacart's Terms of Service.

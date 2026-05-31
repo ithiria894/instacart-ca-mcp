@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root{
+    --bg:#1a1916; --panel:#242220; --ink:#efece6; --muted:#a8a29a;
+    --user:#302e2a; --accent:#d97757; --line:#3a3733;
+    --good:#84c08a; --bad:#df8e74; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg)}
+  body{font-family:-apple-system,"Segoe UI",Roboto,"PingFang HK","Microsoft JhengHei",sans-serif;color:var(--ink)}
+  /* each scene is exactly the viewport */
+  .scene{display:none;width:1280px;height:800px;padding:54px 64px;flex-direction:column;justify-content:center}
+  body[data-scene="drop"]   #scene-drop,
+  body[data-scene="ask"]    #scene-ask,
+  body[data-scene="result"] #scene-result,
+  body[data-scene="how"]    #scene-how{display:flex}
+
+  .kicker{font-size:15px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:14px}
+  h1{font-size:40px;line-height:1.15;font-weight:760;margin-bottom:10px;letter-spacing:-.01em}
+  .sub{font-size:19px;color:var(--muted);line-height:1.5;margin-bottom:34px;max-width:880px}
+
+  /* chat window */
+  .win{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,.5)}
+  .bar{display:flex;align-items:center;gap:9px;padding:15px 20px;border-bottom:1px solid var(--line);background:#2b2926}
+  .dot{width:12px;height:12px;border-radius:50%}.r{background:#ff5f57}.y{background:#febc2e}.g{background:#28c840}
+  .wtitle{margin-left:12px;font-size:14px;color:var(--muted);font-weight:500}
+  .wbody{padding:30px 32px}
+
+  .row{display:flex;margin-bottom:24px}.row:last-child{margin-bottom:0}
+  .row.me{justify-content:flex-end}
+  .bub{max-width:82%;padding:14px 19px;border-radius:15px;font-size:21px;line-height:1.5}
+  .me .bub{background:var(--user);border:1px solid var(--line)}
+  .ai{display:flex;gap:15px;align-items:flex-start;width:100%}
+  .av{flex:0 0 34px;width:34px;height:34px;border-radius:9px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:19px;color:#1a1916}
+  .ai .content{flex:1}
+  .tool{font-size:16px;color:var(--muted);font-family:var(--mono);margin-bottom:16px}
+  .tool b{color:var(--accent);font-weight:600}
+  .lead{font-size:20px;line-height:1.55;margin-bottom:18px}
+
+  table{width:100%;border-collapse:collapse;font-size:18px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  thead th{background:#2f2c29;color:var(--muted);font-weight:600;text-align:left;padding:12px 17px;font-size:14px;letter-spacing:.04em;text-transform:uppercase}
+  td{padding:13px 17px;border-top:1px solid var(--line)}
+  .store{font-weight:650}
+  .price{font-variant-numeric:tabular-nums;font-weight:700}
+  .cheapest td{background:rgba(240,179,126,.06)}
+  .cheapest .price{color:#f3b988}
+  .tag{font-size:15px;padding:3px 12px;border-radius:22px;white-space:nowrap;font-weight:650}
+  .t-good{background:rgba(132,192,138,.16);color:var(--good)}
+  .t-bad{background:rgba(223,142,116,.14);color:var(--bad)}
+  .note{font-size:17px;color:var(--muted);margin-top:18px;line-height:1.55}
+  .note b{color:var(--ink);font-weight:650}
+
+  /* steps */
+  .steps{display:flex;gap:22px;margin-top:10px}
+  .step{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:28px 26px}
+  .snum{width:38px;height:38px;border-radius:10px;background:var(--accent);color:#1a1916;font-weight:800;font-size:20px;display:flex;align-items:center;justify-content:center;margin-bottom:18px}
+  .stitle{font-size:22px;font-weight:700;margin-bottom:10px}
+  .sdesc{font-size:16px;color:var(--muted);line-height:1.55}
+  code{font-family:var(--mono);background:#15140f;border:1px solid var(--line);border-radius:7px;padding:2px 8px;font-size:15px;color:#e7c9b8}
+  .codeblock{font-family:var(--mono);background:#141310;border:1px solid var(--line);border-radius:12px;padding:20px 22px;font-size:18px;line-height:1.7;color:#d8d3cb;margin-top:8px}
+  .codeblock .c{color:#7d776e}
+  .codeblock .ok{color:var(--good)}
+  .foot{margin-top:30px;font-size:16px;color:var(--muted)}
+  .foot b{color:var(--ink)}
+</style>
+</head>
+<body data-scene="drop">
+
+  <!-- SCENE 1 — what it is -->
+  <section class="scene" id="scene-drop">
+    <div class="kicker">instacart-ca-mcp</div>
+    <h1>Compare grocery prices across every store —<br>right from your AI chat.</h1>
+    <div class="sub">An MCP server that speaks Instacart Canada's own API from your logged-in
+      session. Real prices, your delivery zone, 50+ stores, no API key.</div>
+    <div class="codeblock">
+      <span class="c"># one-time: log in once, it stays logged in</span><br>
+      $ npm run login<br>
+      <span class="ok">✓ Logged in — session saved to profile</span>
+    </div>
+  </section>
+
+  <!-- SCENE 2 — the ask -->
+  <section class="scene" id="scene-ask">
+    <div class="win" style="max-width:980px;margin:0 auto;width:100%">
+      <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="wtitle">Claude · instacart-ca-mcp</span></div>
+      <div class="wbody">
+        <div class="row me"><div class="bub">幫我比較免治牛肉 (ground beef) 邊間店最平 🥩</div></div>
+        <div class="row">
+          <div class="ai"><div class="av">✳</div><div class="content">
+            <div class="tool">⏺ <b>instacart_compare</b>(query: "ground beef", category: "meat-and-seafood")</div>
+            <div class="lead" style="color:var(--muted)">Checking Walmart, Save-On, Superstore, T&amp;T, Costco…</div>
+          </div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCENE 3 — the result (money shot) -->
+  <section class="scene" id="scene-result">
+    <div class="win" style="max-width:1040px;margin:0 auto;width:100%">
+      <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="wtitle">Claude · instacart-ca-mcp</span></div>
+      <div class="wbody">
+        <div class="row">
+          <div class="ai"><div class="av">✳</div><div class="content">
+            <div class="lead">Cheapest ground beef in your zone — with each store's pricing flagged:</div>
+            <table>
+              <thead><tr><th>Store</th><th>Cheapest match</th><th>Price</th><th>Pricing</th></tr></thead>
+              <tbody>
+                <tr class="cheapest"><td class="store">Walmart</td><td>Regular Ground Beef</td><td class="price">$6.27</td><td><span class="tag t-bad">↑ markup</span></td></tr>
+                <tr><td class="store">Save-On-Foods</td><td>Western Canadian Fresh Ground Beef</td><td class="price">$8.50</td><td><span class="tag t-good">✓ real shelf price</span></td></tr>
+                <tr><td class="store">Superstore</td><td>Medium Ground Beef</td><td class="price">$9.50</td><td><span class="tag t-bad">↑ markup</span></td></tr>
+                <tr><td class="store">T&amp;T</td><td>Sakura Farms Lean Ground Pork</td><td class="price">$10.07</td><td><span class="tag t-bad">↑ markup</span></td></tr>
+                <tr><td class="store">Costco</td><td>Lean Ground Beef <span style="color:var(--muted)">(bulk)</span></td><td class="price">$38.47</td><td><span class="tag t-bad">↑ markup</span></td></tr>
+              </tbody>
+            </table>
+            <div class="note"><b>Walmart $6.27</b> is cheapest but marked up; <b>Save-On $8.50</b> is the real in-store price (no markup). Category mode = zero off-topic noise.</div>
+          </div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCENE 4 — how to use -->
+  <section class="scene" id="scene-how">
+    <div class="kicker">Get started in 3 steps</div>
+    <h1 style="margin-bottom:30px">Own a browser, log in once, ask away.</h1>
+    <div class="steps">
+      <div class="step"><div class="snum">1</div><div class="stitle">Install</div>
+        <div class="sdesc"><code>npm install</code> · <code>npx playwright install chromium</code> · <code>npm run build</code>. The server owns its own Chromium — it does <b>not</b> touch your everyday browser.</div></div>
+      <div class="step"><div class="snum">2</div><div class="stitle">Log in once</div>
+        <div class="sdesc"><code>npm run login</code> opens a window. Sign in to instacart.ca once; the session is saved and survives restarts.</div></div>
+      <div class="step"><div class="snum">3</div><div class="stitle">Register &amp; ask</div>
+        <div class="sdesc">Add it to your MCP host (<code>~/.mcp.json</code>), then just ask: <i>"compare ground beef across stores."</i></div></div>
+    </div>
+    <div class="foot">⭐ <b>github.com/ithiria894/instacart-ca-mcp</b> · MIT · unofficial</div>
+  </section>
+
+</body>
+</html>

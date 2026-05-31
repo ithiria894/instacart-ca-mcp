@@ -4,3 +4,6 @@ node_modules/
 # The MCP's logged-in browser profile (never commit — contains session cookies)
 .instacart-ca-mcp/
 cookies.txt
+
+# demo build artifacts
+assets/frames/
