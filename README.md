@@ -2,6 +2,8 @@
 
 An MCP server for **Instacart Canada** (`instacart.ca`). Ask your AI assistant to search products, browse categories, and compare prices across every store in your delivery zone — no clicking through the website, no API key.
 
+**No Chrome to open, no DevTools, no debug port.** The server runs its own browser — you log in once and it stays logged in.
+
 <p align="center">
   <img src="assets/instacart-ca-mcp-demo.gif" width="680" alt="Demo: you ask 'compare ground beef across stores', the assistant calls instacart_compare and returns a cheapest-first table — Walmart $6.27 (markup), Save-On $8.50 (real shelf price), Superstore, T&T, Costco — then a 3-step get-started guide.">
 </p>
@@ -59,7 +61,7 @@ npm run build
 
 ### Log in (one time)
 
-The server owns its own Chromium profile, so you log in once and it stays logged in.
+The server owns its own Chromium profile, so you log in once and it stays logged in. **You never open your own browser or touch DevTools** — `npm run login` opens the server's own window. Both methods below are tested working.
 
 **Option A — interactive login (needs a display):**
 
@@ -167,6 +169,8 @@ MIT
 
 一個畀 **Instacart Canada**（`instacart.ca`）用嘅 MCP server。叫你個 AI 助手幫你搜尋產品、瀏覽分類、跨店比價 —— 唔使自己撳網站，唔使 API key。
 
+**唔使開 Chrome、唔使 DevTools、唔使 debug port。** 個 server 自己有 browser —— 你登入一次，之後長期記住。
+
 > ⚠️ **非官方。** 呢個係用你自己已登入嘅 browser session，行 instacart.ca 個**內部** GraphQL API（同個網站自己用嘅一模一樣）。Instacart 改 frontend 隨時會壞。自用為主，請遵守 Instacart 嘅服務條款。
 
 ---
@@ -218,7 +222,7 @@ npm run build
 
 ### 登入（一次過）
 
-呢個 server 擁有自己一個 Chromium profile，所以你登入一次就會長期記住。
+呢個 server 擁有自己一個 Chromium profile，所以你登入一次就會長期記住。**你完全唔使開自己嘅 browser、唔使掂 DevTools** —— `npm run login` 開嘅係 server 自己嗰個視窗。下面兩個方法都實測過 work。
 
 **方法 A — 互動登入（要有畫面）：**
 
