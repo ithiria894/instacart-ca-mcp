@@ -93,11 +93,12 @@ const TOOLS = [
     },
     {
         name: "instacart_deals",
-        description: "Top on-sale / flyer deals at a store. Args: store, maxResults.",
+        description: "On-sale items at a store (with struck-through original prices). Optionally scope to a query like 'milk' or 'beef'. Args: store, query (optional), maxResults.",
         inputSchema: {
             type: "object",
             properties: {
                 store: { type: "string", description: "Store name: " + STORE_NAMES },
+                query: { type: "string", description: "Optional: scope deals to a product, e.g. 'milk'" },
                 maxResults: { type: "number", description: "Max deals (default 20)" },
             },
             required: ["store"],
@@ -157,11 +158,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         if (name === "instacart_deals") {
             const store = String(args.store ?? "");
+            const query = args.query ? String(args.query) : "";
             const maxResults = typeof args.maxResults === "number" ? args.maxResults : 20;
             // Use the authoritative shopId from the live list (STORES can be stale).
             const { shopId } = await resolveStore(store);
-            const r = await getDeals(shopId || toShopId(store), maxResults);
-            return text(JSON.stringify({ store, ...r }, null, 2));
+            const r = await getDeals(shopId || toShopId(store), query, maxResults);
+            return text(JSON.stringify({ store, query, ...r }, null, 2));
         }
         throw new Error("Unknown tool: " + name);
     }

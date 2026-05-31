@@ -295,24 +295,68 @@ export async function resolveStore(name) {
 }
 // --- 4. Deals (on-sale) -----------------------------------------------------
 /**
- * On-sale items for a store. The dedicated flyer ops
- * (FlyerTopSavingsMasonryItems / FlyerPlacements / personalized) proved
- * unreliable headless (return empty), but every store's "Sales" collection —
- * slug `dynamic` — is the same data via the reliable collection API, and items
- * carry fullPrice (the struck-through original). We browse `dynamic` and keep
- * only genuinely-discounted items (fullPrice present and > price).
+ * On-sale items for a store. The dedicated flyer ops (FlyerTopSavingsMasonryItems
+ * / FlyerPlacements / personalized) and the "dynamic" Sales collection return
+ * empty headless. What works is a normal search with the on-sale refinement —
+ * filters:[{key:"sales",value:"on_sale"}] (NOTE: FilterInput is {key,value}, not
+ * {filterKey}). On-sale items carry fullPrice (the struck original); we keep
+ * those, biggest saving first.
+ *
+ * The refinement is query-scoped, so pass a query (e.g. "milk", "beef"); with no
+ * query we sweep a few common terms to assemble a general deal list.
  */
-export async function getDeals(shopId, first = 20) {
-    const r = await browseCollection(shopId, "dynamic", Math.max(first * 2, 30));
-    if (!r.ok)
-        return r;
-    const onSale = r.products.filter((p) => p.fullPrice && priceOf(p.fullPrice) > priceOf(p.price));
-    // If nothing carried a struck price, fall back to whatever the sales
-    // collection returned (some stores price the discount inline).
-    const products = (onSale.length ? onSale : r.products)
-        .filter((p) => p.name && priceOf(p.price) > 0)
-        .slice(0, first);
-    return { ok: true, products };
+const DEFAULT_DEAL_TERMS = ["meat", "chicken", "produce", "dairy", "snacks", "frozen"];
+async function searchOnSale(shopId, query, first) {
+    const variablesExpr = `{
+    action: null, query: ${JSON.stringify(query)}, pageViewId: "deals-"+${JSON.stringify(shopId)}+"-"+Date.now(),
+    elevatedProductId: null, searchSource: "search", filters: [{ key: "sales", value: "on_sale" }],
+    disableReformulation: false, disableLlm: false, forceInspiration: false,
+    orderBy: "bestMatch", clusterId: null, includeDebugInfo: false,
+    clusteringStrategy: null, contentManagementSearchParams: { itemGridColumnCount: 1 },
+    shopId: ${JSON.stringify(shopId)}, postalCode: ${JSON.stringify(ZONE.postalCode)},
+    zoneId: ${JSON.stringify(ZONE.zoneId)}, first: ${Math.max(first, 30)}
+  }`;
+    const fnBody = `
+    ${gqlFetchJs("SearchResultsPlacements", HASHES.SearchResultsPlacements, variablesExpr)}
+    if (status !== 200) return { ok: false, error: "HTTP " + status, products: [] };
+    if (s.indexOf('"errors"') !== -1 && s.indexOf('"data"') === -1) return { ok: false, error: s.slice(0, 200), products: [] };
+    ${itemParserJs(60)}
+    return { ok: true, products: out };
+  `;
+    const res = await evalInInstacartPage(fnBody);
+    if (!res.ok)
+        return { ok: false, products: [], error: res.error };
+    return res.value;
+}
+export async function getDeals(shopId, query = "", first = 20) {
+    const terms = query.trim() ? [query] : DEFAULT_DEAL_TERMS;
+    const seen = new Set();
+    const deals = [];
+    let lastErr;
+    for (const term of terms) {
+        const r = await searchOnSale(shopId, term, 40);
+        if (!r.ok) {
+            lastErr = r.error;
+            continue;
+        }
+        for (const p of r.products) {
+            if (query.trim() && !isRelevant(query, p.name))
+                continue;
+            if (seen.has(p.name))
+                continue;
+            seen.add(p.name);
+            deals.push(p);
+        }
+        if (deals.length >= first)
+            break;
+    }
+    // Genuine markdowns (struck price) first, then biggest absolute saving.
+    deals.sort((a, b) => {
+        const sa = a.fullPrice ? priceOf(a.fullPrice) - priceOf(a.price) : -1;
+        const sb = b.fullPrice ? priceOf(b.fullPrice) - priceOf(b.price) : -1;
+        return sb - sa;
+    });
+    return { ok: true, products: deals.slice(0, first), error: deals.length ? undefined : lastErr };
 }
 // --- relevance + synonyms ---------------------------------------------------
 const STOPWORDS = new Set([
