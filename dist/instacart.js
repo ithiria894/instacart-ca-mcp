@@ -122,21 +122,35 @@ export async function searchStore(shopId, query, first = 8) {
     if (!res.ok)
         return { ok: false, products: [], error: res.error };
     // Instacart pads results with "you might also like" recommendations that
-    // ignore the query (e.g. Nutella under "chicken thigh"). Keep only products
-    // whose name actually matches a meaningful query word, then trim to `first`.
-    const matches = (res.value.products || []).filter((p) => isRelevant(query, p.name));
-    const products = (matches.length ? matches : res.value.products).slice(0, first);
+    // ignore the query (e.g. Nutella under "chicken thigh", makeup under "ground
+    // beef" at a store that doesn't sell it). Keep only products whose name
+    // actually matches the query. Unlike before we DON'T fall back to raw results
+    // when the filter empties them — a store that sells nothing relevant should
+    // return nothing, not noise.
+    const products = (res.value.products || [])
+        .filter((p) => isRelevant(query, p.name))
+        .slice(0, first);
     return { ok: true, products };
 }
 const STOPWORDS = new Set([
     "the", "and", "with", "for", "pack", "value", "large", "small", "fresh",
-    "organic", "boneless", "skinless", "each",
+    "organic", "boneless", "skinless", "each", "lean", "extra", "regular",
+    "medium", "family", "premium", "natural", "free", "range", "grade",
 ]);
+// Words that, when they appear as the ONLY query match, usually mean a wrong
+// category snuck in (jerky/snack/treat under a fresh-meat query, etc.). If a
+// product matches the query only via these, treat it as irrelevant.
+const NEGATIVE_HINTS = {
+    beef: ["jerky", "snack", "stuffed", "bone", "hoof", "ear", "treat", "soup", "noodle", "burger", "meatball", "wrap", "teriyaki"],
+    chicken: ["jerky", "snack", "stuffed", "bone", "treat", "soup", "noodle", "broth", "stock"],
+    pork: ["jerky", "snack", "rind", "treat", "soup"],
+    fish: ["food", "oil", "sauce", "cracker", "snack"],
+};
 /**
- * A product is relevant if its name contains at least one meaningful word from
- * the query. Words are lowercased, stopwords dropped, and a trailing "s" is
- * stripped so "eggs" matches "egg". If the query has no meaningful words
- * (e.g. all stopwords), everything is considered relevant.
+ * A product is relevant if its name contains at least one meaningful query word
+ * AND (when the query names a fresh-food category) isn't only matching via a
+ * known wrong-category hint word. Words are lowercased, stopwords dropped, and a
+ * trailing "s" stripped so "eggs" matches "egg".
  */
 export function isRelevant(query, name) {
     const tokens = query
@@ -147,7 +161,66 @@ export function isRelevant(query, name) {
     if (!tokens.length)
         return true;
     const lname = name.toLowerCase();
-    return tokens.some((t) => lname.includes(t));
+    const matched = tokens.filter((t) => lname.includes(t));
+    if (!matched.length)
+        return false;
+    // If every matched token has negative hints and the name hits one, reject.
+    const hits = matched.flatMap((t) => NEGATIVE_HINTS[t] || []);
+    if (hits.length && hits.some((h) => lname.includes(h))) {
+        // …unless the name ALSO contains a clean "<category>" word like "ground beef"
+        // / "beef steak" that isn't itself a hint. Allow if a non-hint food word
+        // sits right next to the category (heuristic: "ground" present).
+        if (!/\bground\b|\bsteak\b|\bfillet\b|\bbreast\b|\bthigh\b|\bdrumstick\b/.test(lname)) {
+            return false;
+        }
+    }
+    return true;
+}
+/**
+ * Synonym/translation expansion. instacart.ca is English, but its search is
+ * fuzzy, so a few extra phrasings catch products a single term misses (e.g.
+ * "minced beef" / "ground beef", or a store that lists fresh meat under a
+ * different wording). Returned list is the original query first, then variants.
+ */
+const SYNONYMS = {
+    "ground beef": ["minced beef", "lean ground beef", "beef mince"],
+    "ground pork": ["minced pork", "pork mince"],
+    "ground chicken": ["minced chicken", "chicken mince"],
+    "chicken thigh": ["chicken thighs", "boneless chicken thigh"],
+    "chicken breast": ["chicken breasts", "boneless chicken breast"],
+    eggs: ["egg", "large eggs", "dozen eggs"],
+    milk: ["2% milk", "whole milk", "homogenized milk"],
+    tofu: ["firm tofu", "soft tofu", "bean curd"],
+    "green onion": ["green onions", "scallion", "spring onion"],
+    "bok choy": ["baby bok choy", "shanghai bok choy"],
+    "soy sauce": ["light soy sauce", "soya sauce"],
+    shrimp: ["prawns", "shrimps"],
+    salmon: ["salmon fillet", "atlantic salmon"],
+};
+export function expandQuery(query) {
+    const q = query.trim().toLowerCase();
+    const variants = SYNONYMS[q] || [];
+    // de-dupe, keep original first
+    return [query, ...variants.filter((v) => v.toLowerCase() !== q)];
+}
+/**
+ * Search a store, trying the query plus synonyms until enough relevant products
+ * come back. Stops as soon as a variant yields results, so common items cost a
+ * single request; only sparse/oddly-worded stores fall through to variants.
+ */
+export async function searchStoreSmart(shopId, query, first = 6) {
+    let lastErr;
+    const variants = expandQuery(query);
+    for (const v of variants) {
+        const r = await searchStore(shopId, v, first);
+        if (!r.ok) {
+            lastErr = r.error;
+            continue;
+        }
+        if (r.products.length)
+            return { ok: true, products: r.products, triedAll: false };
+    }
+    return { ok: true, products: [], triedAll: true, error: lastErr };
 }
 /** Run an async fn over items with a bounded concurrency limit, preserving order. */
 async function mapLimit(items, limit, fn) {
@@ -171,13 +244,20 @@ async function mapLimit(items, limit, fn) {
 export async function comparePrices(query, storeNames, concurrency = 4) {
     const entries = Object.entries(STORES).filter(([store]) => !storeNames || storeNames.includes(store));
     const results = await mapLimit(entries, concurrency, async ([store, shopId]) => {
-        const r = await searchStore(shopId, query, 6);
+        const r = await searchStoreSmart(shopId, query, 6);
         return {
             store,
             topMatch: r.products[0] || null,
             allMatches: r.products,
             error: r.error,
         };
+    });
+    // Stores that carry the item first, sorted by cheapest top match; empties last.
+    const priceOf = (s) => (s ? parseFloat(s.replace(/[^\d.]/g, "")) : Infinity);
+    results.sort((a, b) => {
+        const av = a.allMatches.length ? priceOf(a.topMatch?.price) : Infinity;
+        const bv = b.allMatches.length ? priceOf(b.topMatch?.price) : Infinity;
+        return av - bv;
     });
     return { query, results };
 }
