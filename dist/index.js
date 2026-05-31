@@ -144,7 +144,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             const query = String(args.query ?? "");
             const store = args.store ? String(args.store) : Object.keys(STORES)[0];
             const maxResults = typeof args.maxResults === "number" ? args.maxResults : 8;
-            const r = await searchStore(toShopId(store), query, maxResults);
+            const { shopId } = await resolveStore(store);
+            const r = await searchStore(shopId || toShopId(store), query, maxResults);
             return text(JSON.stringify({ store, ...r }, null, 2));
         }
         if (name === "instacart_compare") {
@@ -157,7 +158,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (name === "instacart_deals") {
             const store = String(args.store ?? "");
             const maxResults = typeof args.maxResults === "number" ? args.maxResults : 20;
-            const r = await getDeals(toShopId(store), maxResults);
+            // Use the authoritative shopId from the live list (STORES can be stale).
+            const { shopId } = await resolveStore(store);
+            const r = await getDeals(shopId || toShopId(store), maxResults);
             return text(JSON.stringify({ store, ...r }, null, 2));
         }
         throw new Error("Unknown tool: " + name);

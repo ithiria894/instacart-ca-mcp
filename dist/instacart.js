@@ -235,13 +235,37 @@ export async function listStores() {
     const res = await evalInInstacartPage(fnBody);
     if (!res.ok || !res.value?.ok)
         return [];
-    // Decode & etc. that survived in raw-text parsing (e.g. "T&T").
+    const parity = await getPriceParitySlugs();
+    // Decode & etc. that survived in raw-text parsing (e.g. "T&T"), tag no-markup.
     const stores = (res.value.stores || []).map((st) => ({
         ...st,
         name: decodeUnicode(st.name),
+        noMarkup: parity.has(st.slug),
     }));
     storesCache = stores;
     return stores;
+}
+/**
+ * Slugs of stores Instacart flags as "No markups" (price parity = in-store
+ * prices). The price-parity directory HTML embeds these (unlike storefronts, a
+ * raw fetch works here). Cached for the process lifetime.
+ */
+let parityCache = null;
+export async function getPriceParitySlugs() {
+    if (parityCache)
+        return parityCache;
+    const fnBody = `
+    const r = await fetch("/store/directory?filter=priceParity", { credentials: "include", headers: { accept: "text/html" } });
+    const s = await r.text();
+    const out = {}; const list = [];
+    const re = /\\/store\\/([a-z0-9-]{3,40})\\/storefront/g;
+    let __m;
+    while ((__m = re.exec(s)) !== null) { if (!out[__m[1]]) { out[__m[1]] = 1; list.push(__m[1]); } }
+    return { ok: true, slugs: list };
+  `;
+    const res = await evalInInstacartPage(fnBody);
+    parityCache = new Set(res.ok && res.value ? res.value.slugs : []);
+    return parityCache;
 }
 function decodeUnicode(s) {
     return s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
@@ -269,20 +293,26 @@ export async function resolveStore(name) {
         shopId = STORES[name] || null;
     return { slug, shopId };
 }
-// --- 4. Flyer / deals -------------------------------------------------------
-/** On-sale / top-savings items for a store (flyer). */
+// --- 4. Deals (on-sale) -----------------------------------------------------
+/**
+ * On-sale items for a store. The dedicated flyer ops
+ * (FlyerTopSavingsMasonryItems / FlyerPlacements / personalized) proved
+ * unreliable headless (return empty), but every store's "Sales" collection —
+ * slug `dynamic` — is the same data via the reliable collection API, and items
+ * carry fullPrice (the struck-through original). We browse `dynamic` and keep
+ * only genuinely-discounted items (fullPrice present and > price).
+ */
 export async function getDeals(shopId, first = 20) {
-    const variablesExpr = `{ shopId: ${JSON.stringify(shopId)}, source: "flyers_destination" }`;
-    const fnBody = `
-    ${gqlFetchJs("FlyerTopSavingsMasonryItems", HASHES.FlyerTopSavingsMasonryItems, variablesExpr)}
-    if (status !== 200) return { ok: false, error: "HTTP " + status, products: [] };
-    ${itemParserJs(first)}
-    return { ok: true, products: out };
-  `;
-    const res = await evalInInstacartPage(fnBody);
-    if (!res.ok)
-        return { ok: false, products: [], error: res.error };
-    return res.value;
+    const r = await browseCollection(shopId, "dynamic", Math.max(first * 2, 30));
+    if (!r.ok)
+        return r;
+    const onSale = r.products.filter((p) => p.fullPrice && priceOf(p.fullPrice) > priceOf(p.price));
+    // If nothing carried a struck price, fall back to whatever the sales
+    // collection returned (some stores price the discount inline).
+    const products = (onSale.length ? onSale : r.products)
+        .filter((p) => p.name && priceOf(p.price) > 0)
+        .slice(0, first);
+    return { ok: true, products };
 }
 // --- relevance + synonyms ---------------------------------------------------
 const STOPWORDS = new Set([
@@ -396,13 +426,18 @@ export async function comparePrices(query, opts = {}) {
                 await getCategories(slug);
         }
     }
+    const parity = await getPriceParitySlugs();
+    const noMarkupFor = (store) => {
+        const slug = STORE_SLUGS[store];
+        return slug ? parity.has(slug) : undefined;
+    };
     const results = await mapLimit(entries, concurrency, async ([store, fallbackShopId]) => {
         if (opts.category) {
             const r = await compareViaCategory(store, opts.category, query);
-            return { store, topMatch: r.products[0] || null, allMatches: r.products, via: r.via, error: r.error };
+            return { store, topMatch: r.products[0] || null, allMatches: r.products, via: r.via, noMarkup: noMarkupFor(store), error: r.error };
         }
         const r = await searchStoreSmart(fallbackShopId, query, 6);
-        return { store, topMatch: r.products[0] || null, allMatches: r.products, error: r.error };
+        return { store, topMatch: r.products[0] || null, allMatches: r.products, noMarkup: noMarkupFor(store), error: r.error };
     });
     results.sort((a, b) => {
         const av = a.allMatches.length ? priceOf(a.topMatch?.price) : Infinity;
