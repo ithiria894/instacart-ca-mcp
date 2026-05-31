@@ -52,12 +52,12 @@ function parseCookies(raw) {
         const value = part.slice(eq + 1).trim();
         if (!name)
             continue;
-        const base = { name, value, expires: oneYear };
         if (name.startsWith("__Host-")) {
-            cookies.push({ ...base, url: "https://www.instacart.ca/", path: "/", secure: true });
+            // __Host- cookies must be Secure + path "/" + NO domain → add by url.
+            cookies.push({ name, value, expires: oneYear, path: "/", secure: true, url: "https://www.instacart.ca/" });
         }
         else {
-            cookies.push({ ...base, domain: ".instacart.ca", path: "/", secure: true });
+            cookies.push({ name, value, expires: oneYear, path: "/", secure: true, domain: ".instacart.ca" });
         }
     }
     return cookies;
