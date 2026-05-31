@@ -59,28 +59,42 @@ export async function searchStore(
     const url = "/graphql?operationName=SearchResultsPlacements&variables=" +
       encodeURIComponent(JSON.stringify(variables)) +
       "&extensions=" + encodeURIComponent(JSON.stringify(ext));
-    const r = await fetch(url, { credentials: "include", headers: { accept: "application/json" } });
+    // The search endpoint enforces the x-client-identifier header (the
+    // CurrentUserFields probe does not); without it search returns HTTP 401.
+    const r = await fetch(url, {
+      credentials: "include",
+      headers: {
+        accept: "*/*",
+        "content-type": "application/json",
+        "x-client-identifier": "web",
+      },
+    });
     if (r.status !== 200) return { ok: false, error: "HTTP " + r.status, products: [] };
-    // Use raw text (not r.json()) — proven-working parse path.
+    // Use raw text (not r.json()) — the response is ~400KB; we only need name+price.
     const s = await r.text();
     if (s.indexOf('"errors"') !== -1 && s.indexOf('"data"') === -1) {
       return { ok: false, error: s.slice(0, 200), products: [] };
     }
-    // Pair each product name with the nearest following price string.
-    const UI = /^(bodymedium|small_currency|dollar|cents|body|caption|title|subtitle|heading|label)/i;
-    const re = /"name":"([^"]{4,80})"/g;
-    let m; const out = []; const seen = new Set();
+    // Each product card has shape (verified live 2026-05-31):
+    //   "id":"items_<shop>-<pid>","itemLoadId":"<uuid>","name":"<PRODUCT>","size":...
+    //   ... (~5-6KB later) ... "priceString":"$X"
+    // Anchor on the item node (id+itemLoadId+name adjacency, which uniquely marks
+    // a real product, not a UI token), then look forward up to 9KB for the first
+    // priceString within that card.
+    const out = []; const seen = new Set();
+    const re = /"id":"items_[\\d-]+","itemLoadId":"[^"]*","name":"([^"]{3,120})"/g;
+    let m;
     while ((m = re.exec(s)) !== null) {
       const name = m[1];
-      if (UI.test(name)) continue;
-      const after = s.substring(m.index, m.index + 900);
-      const pm = after.match(/"(?:priceString|fullPriceString)":"(\\$[\\d.]+)"/);
+      const fwd = s.substring(m.index, m.index + 9000);
+      const pm = fwd.match(/"priceString":"(\\$[\\d.]+)"/);
       if (!pm) continue;
       if (seen.has(name)) continue;
       seen.add(name);
       out.push({ name, price: pm[1] });
+      if (out.length >= ${first}) break;
     }
-    return { ok: true, products: out.slice(0, ${first}) };
+    return { ok: true, products: out };
   `;
   const res = await evalInInstacartPage<{ ok: boolean; products: Product[]; error?: string }>(fnBody);
   if (!res.ok) return { ok: false, products: [], error: res.error };

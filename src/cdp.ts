@@ -1,23 +1,31 @@
 /**
- * CDP connection layer.
+ * Browser layer (Playwright, self-owned persistent profile).
  *
- * Connects to a Chrome instance that already has the user logged in to
- * instacart.ca, finds (or opens) an instacart.ca tab, and runs JavaScript in
- * that page's context. Because the code runs *inside* the logged-in page, the
- * httpOnly session cookies are sent automatically with every fetch — same
- * trick our Reddit MCP uses: hit the site's own internal API as the page does.
+ * Instead of attaching to an external Chrome (whose /json DevTools endpoint is
+ * locked down on this machine), the MCP launches and owns its own Chromium with
+ * a persistent user-data-dir. You log in to instacart.ca there ONCE; the
+ * session is stored in the profile and survives restarts.
  *
- * Chrome must be started with remote debugging enabled, e.g.:
- *   google-chrome --remote-debugging-port=9222 --user-data-dir=~/.instacart-ca-mcp/chrome
- * then log in to instacart.ca once in that window.
+ * All work runs *inside* the logged-in instacart.ca page via page.evaluate, so
+ * httpOnly session cookies are sent automatically — we hit the site's own
+ * internal GraphQL API the same way the page does (the Reddit-MCP pattern).
+ *
+ * First-time login:
+ *   INSTACART_HEADLESS=false  → a visible window opens; log in to instacart.ca.
+ * After that, leave INSTACART_HEADLESS unset (headless) — the profile keeps you
+ * logged in.
  */
-// chrome-remote-interface ships no types; treat as any.
-import CDPImport from "chrome-remote-interface";
-const CDP: any = CDPImport;
-type CDPClient = any;
+import { chromium, type BrowserContext, type Page } from "playwright-core";
+import os from "os";
+import path from "path";
+import fs from "fs";
 
-const DEBUG_PORT = Number(process.env.INSTACART_CDP_PORT || 9222);
-const DEBUG_HOST = process.env.INSTACART_CDP_HOST || "127.0.0.1";
+const PROFILE_DIR =
+  process.env.INSTACART_PROFILE_DIR ||
+  path.join(os.homedir(), ".instacart-ca-mcp", "profile");
+
+const HEADLESS = process.env.INSTACART_HEADLESS !== "false";
+const STORE_URL = "https://www.instacart.ca/store";
 
 export interface EvalResult<T> {
   ok: boolean;
@@ -26,102 +34,72 @@ export interface EvalResult<T> {
 }
 
 function log(...args: unknown[]) {
-  // MCP uses stdout for protocol; all logs go to stderr.
   console.error("[instacart-ca-mcp]", ...args);
 }
 
-/** Find an instacart.ca tab among open targets; returns its targetId or null. */
-async function findInstacartTarget(): Promise<string | null> {
-  const targets = await CDP.List({ host: DEBUG_HOST, port: DEBUG_PORT });
-  log(`Found ${targets.length} CDP targets`);
-  const page = targets.find(
-    (t: any) => t.type === "page" && t.url.includes("instacart.ca")
-  );
-  if (page) {
-    log(`Using existing instacart.ca tab: ${page.url}`);
-    return page.id;
+// Singleton persistent context reused across calls within one server process.
+let ctx: BrowserContext | null = null;
+let page: Page | null = null;
+
+async function getPage(): Promise<Page> {
+  if (ctx && page && !page.isClosed()) return page;
+
+  fs.mkdirSync(PROFILE_DIR, { recursive: true });
+  log(`Launching Chromium (headless=${HEADLESS}) profile=${PROFILE_DIR}`);
+  ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
+    headless: HEADLESS,
+    viewport: { width: 1280, height: 800 },
+    locale: "en-CA",
+    timezoneId: "America/Vancouver",
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+    ],
+  });
+
+  page = ctx.pages()[0] || (await ctx.newPage());
+  if (!page.url().includes("instacart.ca")) {
+    await page.goto(STORE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForTimeout(3000);
   }
-  return null;
+  return page;
 }
 
-/**
- * Run an async JS function string in the instacart.ca page context and return
- * its JSON-serialised result. Opens an instacart.ca tab if none exists.
- */
+/** Run an async JS function body in the instacart.ca page; return its result. */
 export async function evalInInstacartPage<T = unknown>(
   fnBody: string
 ): Promise<EvalResult<T>> {
-  let client: CDPClient | undefined;
   try {
-    let targetId = await findInstacartTarget();
-
-    if (!targetId) {
-      // No instacart tab open — create one and navigate.
-      log("No instacart.ca tab found; opening one");
-      const target = await CDP.New({
-        host: DEBUG_HOST,
-        port: DEBUG_PORT,
-        url: "https://www.instacart.ca/store",
-      });
-      targetId = target.id;
-      client = await CDP({ host: DEBUG_HOST, port: DEBUG_PORT, target: targetId });
-      await client.Page.enable();
-      await client.Page.loadEventFired();
-      // give the SPA a moment to settle
-      await new Promise((r) => setTimeout(r, 3000));
-    } else {
-      client = await CDP({ host: DEBUG_HOST, port: DEBUG_PORT, target: targetId });
+    const p = await getPage();
+    if (!p.url().includes("instacart.ca")) {
+      await p.goto(STORE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await p.waitForTimeout(3000);
     }
-
-    await client.Runtime.enable();
-    await client.Page.enable();
-
-    // Guarantee the tab is actually on an instacart.ca origin, otherwise a
-    // relative fetch('/graphql') would hit the wrong site and return nothing.
-    const { result: urlRes } = await client.Runtime.evaluate({
-      expression: "location.href",
-      returnByValue: true,
-    });
-    const currentUrl = String(urlRes?.value || "");
-    if (!currentUrl.includes("instacart.ca")) {
-      log(`Tab is on ${currentUrl}; navigating to instacart.ca`);
-      await client.Page.navigate({ url: "https://www.instacart.ca/store" });
-      await client.Page.loadEventFired();
-      await new Promise((r) => setTimeout(r, 3500));
-    }
-
     const expression = `(async () => { ${fnBody} })()`;
-    const { result, exceptionDetails } = await client.Runtime.evaluate({
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-
-    if (exceptionDetails) {
-      return {
-        ok: false,
-        error:
-          exceptionDetails.exception?.description ||
-          exceptionDetails.text ||
-          "Unknown evaluation error",
-      };
-    }
-
-    return { ok: true, value: result.value as T };
+    const value = (await p.evaluate(expression)) as T;
+    if (value === undefined) return { ok: false, error: "Eval returned undefined" };
+    return { ok: true, value };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  } finally {
-    if (client) await client.close().catch(() => {});
   }
 }
 
-/** Verify Chrome is reachable + an instacart.ca session looks logged in. */
-export async function checkConnection(): Promise<EvalResult<{ loggedIn: boolean; url: string }>> {
-  const res = await evalInInstacartPage<{ loggedIn: boolean; url: string }>(`
+/** Verify the owned browser session is logged in to instacart.ca. */
+export async function checkConnection(): Promise<
+  EvalResult<{ loggedIn: boolean; url: string }>
+> {
+  return evalInInstacartPage<{ loggedIn: boolean; url: string }>(`
     const r = await fetch("/graphql?operationName=CurrentUserFields&variables=%7B%7D&extensions=%7B%22persistedQuery%22%3A%7B%22version%22%3A1%2C%22sha256Hash%22%3A%22d7d1050d8a8efb9a24d2fd0d9c39f58d852ab84ea709370bcbedbca790112952%22%7D%7D", { credentials: "include", headers: { accept: "application/json" } });
-    const j = await r.json().catch(() => ({}));
-    const s = JSON.stringify(j);
-    return { loggedIn: r.status === 200 && !s.includes("null") === false ? true : (r.status === 200), url: location.href };
+    const t = await r.text();
+    return { loggedIn: r.status === 200 && t.includes('"id"'), url: location.href };
   `);
-  return res;
+}
+
+/** Close the owned browser (called on server shutdown). */
+export async function shutdown(): Promise<void> {
+  if (ctx) await ctx.close().catch(() => {});
+  ctx = null;
+  page = null;
 }
