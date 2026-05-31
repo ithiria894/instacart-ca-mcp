@@ -119,6 +119,26 @@ The server owns its own Chromium (Playwright `launchPersistentContext`) with a p
 
 Why not attach to your existing Chrome over CDP? Modern Chrome locks down the DevTools HTTP discovery endpoint (`/json`, `/json/version` return 404) and restricts the browser-level WebSocket by origin, so a standalone server can't reliably attach. Owning the browser sidesteps all of that and makes the server self-contained.
 
+## Design journey — what we tried, and why it ended up here
+
+There are three obvious ways to let an AI "use Instacart", and we went through all of them. The order matters, because each failure pushed the design to the next one.
+
+**1. Scrape the website's HTML.** The naive approach: navigate the storefront, read the rendered DOM. It falls apart fast — instacart.ca is a single-page app, prices and product cards load lazily and live behind React state, the markup is obfuscated and changes constantly, and you get one store at a time, slowly. Brittle and slow.
+
+**2. Drive *your* Chrome over CDP, then call the internal GraphQL.** Much better idea: skip the DOM, call the same internal GraphQL API the website calls, from inside a logged-in tab so cookies come for free. The catch is *attaching* to your existing Chrome. Modern Chrome (security hardening) locks down the DevTools discovery endpoints — `/json` and `/json/version` both return 404 — and restricts the browser-level WebSocket by origin. `chrome-remote-interface` fails; Playwright's `connectOverCDP` fails the same way (it hits `/json/version` too); a raw `ws://` attach times out on the origin check. Three independent attach methods, all dead. You simply can't reliably reach an external modern Chrome from a standalone server anymore.
+
+**3. Own the browser. ← the design we shipped.** Instead of attaching to a Chrome we don't control, the server launches and *owns* its own Chromium with a persistent profile. You log in once; the session is written to disk and survives restarts. Every query runs *inside* that logged-in page via `page.evaluate`, so httpOnly cookies are sent automatically and we hit the internal persisted-GraphQL endpoint exactly like the website. Self-contained, publishable, no dependency on whatever Chrome you happen to have open.
+
+Getting #3 actually working took a few more fixes that aren't obvious until you hit them:
+
+- **Session cookies don't persist by default.** `__Host-instacart_sid` is a *session* cookie (no expiry), so a persistent context dropped it on close and the next headless launch was a guest again. Fix: pin a far-future expiry when importing cookies so Chromium writes them to disk.
+- **Search has no category filter, so results are noisy.** A plain search at a store that doesn't carry an item gets padded with cross-category "you might also like" junk (dog food and makeup under "ground beef"). There is no per-item category field to filter on. Fix: use Instacart's own **category collections** (`instacart_browse` / compare's `category` mode) — clean by construction.
+- **The search endpoint needs `x-client-identifier: web`** or it returns 401 (the login check doesn't need it — easy to miss).
+- **shopIds drift.** Hand-captured shopIds go stale (Save-On was 606800, not the 25116 we first noted — that's T&T). Fix: resolve the authoritative shopId from the live store list at call time.
+- **"No markups" is real signal.** The price-parity directory tells you which stores show in-store prices vs an Instacart markup, so a comparison can tag each result.
+
+The short version: **don't scrape, and don't fight modern Chrome's CDP lockdown — own a browser, log in once, and speak the site's own GraphQL.**
+
 ## Limitations
 
 - The login session expires after a few weeks to a few months. When `instacart_check` reports `loggedIn: false`, re-run `npm run login` or `npm run import-cookies`.
@@ -257,6 +277,26 @@ Claude Code 仲要喺 `~/.claude/settings.json` 個 `enabledMcpjsonServers` 入�
 Server 擁有自己一個 Chromium（Playwright `launchPersistentContext`），profile 放喺 `~/.instacart-ca-mcp/profile`。登入一次，restart 都記住。每個 query 都喺嗰個已登入 page 入面用 `page.evaluate` 跑，所以個網站嘅 httpOnly cookie 自動送出，我哋就好似個網站咁打 instacart.ca 自己嘅 persisted-GraphQL endpoint。
 
 點解唔連你現有嘅 Chrome（用 CDP）？因為 modern Chrome 鎖死咗 DevTools 個 HTTP discovery endpoint（`/json`、`/json/version` 返 404），又用 origin 限制咗 browser-level WebSocket，所以一個 standalone server 連唔到。自己擁有個 browser 就避開晒呢啲問題，亦令個 server 自給自足。
+
+## 設計歷程 —— 我哋試過咩，點解最後咁做
+
+要畀 AI「用 Instacart」，表面上有三條路，我哋三條都行過。次序好緊要，因為每次撞牆都逼住個設計行去下一步。
+
+**1. Scrape 個網站嘅 HTML。** 最直覺嗰種：navigate 去 storefront，讀 render 出嚟嘅 DOM。好快就散 —— instacart.ca 係 single-page app，價錢同產品卡係 lazy load、收喺 React state 後面，個 markup 又混淆又成日變，而且一次得一間店、慢。又脆又慢。
+
+**2. 用 CDP 開*你部*Chrome，再叫 AI 打內部 GraphQL。** 好好多嘅諗法：唔好理 DOM，直接打個網站自己打嗰個內部 GraphQL API，喺已登入嘅 tab 入面打，咁 cookie 就自動有。問題係*連*你現有部 Chrome。Modern Chrome（為咗安全）鎖死咗 DevTools 嘅 discovery endpoint —— `/json` 同 `/json/version` 都返 404 —— 又用 origin 限制咗 browser-level WebSocket。`chrome-remote-interface` 死；Playwright 嘅 `connectOverCDP` 一樣死（佢都係打 `/json/version`）；raw `ws://` 直連喺 origin 檢查度 timeout。三個獨立嘅連法，全部死。Standalone server 而家根本無辦法穩定咁連到一部外部 modern Chrome。
+
+**3. 自己擁有個 browser。← 最後出嘅設計。** 唔好連一部我哋控制唔到嘅 Chrome，個 server 自己 launch 兼*擁有*一個有持久 profile 嘅 Chromium。登入一次；session 寫落 disk，restart 都記住。每個 query 都喺嗰個已登入 page 入面用 `page.evaluate` 跑，所以 httpOnly cookie 自動送出，我哋就好似個網站咁打內部 persisted-GraphQL endpoint。自給自足、可以發佈、唔使靠你啱啱開住嗰部 Chrome。
+
+要令 #3 真係 work，仲要解決幾個唔撞唔知嘅問題：
+
+- **Session cookie 預設唔會留低。** `__Host-instacart_sid` 係一條 *session* cookie（冇 expiry），所以 persistent context close 嗰陣會丟咗佢，下次 headless launch 就變返 guest。解法：import cookie 嗰陣強行 pin 一個好遠嘅 expiry，逼 Chromium 寫落 disk。
+- **Search 冇分類 filter，所以有雜訊。** 喺一間冇賣嗰樣嘢嘅店做普通 search，會被塞「你可能想要」嘅跨類垃圾（「免治牛肉」搜出狗糧同化妝品）。冇逐件貨嘅分類欄位可以 filter。解法：用 Instacart 自己嘅**分類 collection**（`instacart_browse` / compare 嘅 `category` 模式）—— 天生乾淨。
+- **Search endpoint 要 `x-client-identifier: web` header**，否則返 401（登入檢查唔使，好易蝦你）。
+- **shopId 會 drift。** 手揀嘅 shopId 會過時（Save-On 係 606800，唔係我哋一開始記低嘅 25116 —— 嗰個係 T&T）。解法：call 嗰陣由即時店列表攞返權威 shopId。
+- **「No markups」係真信號。** Price-parity directory 會話你知邊間店 show 真店價、邊間係 Instacart 加咗價，所以比價可以逐個結果標記。
+
+一句講晒：**唔好 scrape，亦唔好同 modern Chrome 個 CDP 封鎖硬碰 —— 自己擁有一個 browser，登入一次，講個網站自己嘅 GraphQL。**
 
 ## 限制
 
