@@ -47,10 +47,7 @@ function parseCookies(raw: string) {
   // they have to be added by URL. Everything else we pin to the .instacart.ca
   // domain so it survives across www / store subpaths.
   const cleaned = raw.replace(/^\s*cookie:\s*/i, "");
-  type PWCookie = {
-    name: string; value: string; expires: number; path: string; secure: boolean;
-    url?: string; domain?: string;
-  };
+  type PWCookie = { name: string; value: string; expires: number; url: string };
   const cookies: PWCookie[] = [];
   for (const part of cleaned.split(/;\s*/)) {
     const eq = part.indexOf("=");
@@ -58,12 +55,10 @@ function parseCookies(raw: string) {
     const name = part.slice(0, eq).trim();
     const value = part.slice(eq + 1).trim();
     if (!name) continue;
-    if (name.startsWith("__Host-")) {
-      // __Host- cookies must be Secure + path "/" + NO domain → add by url.
-      cookies.push({ name, value, expires: oneYear, path: "/", secure: true, url: "https://www.instacart.ca/" });
-    } else {
-      cookies.push({ name, value, expires: oneYear, path: "/", secure: true, domain: ".instacart.ca" });
-    }
+    // Playwright: a cookie is specified by EITHER url OR domain+path, never both.
+    // Add everything by url — Playwright derives domain/path/secure from it, and
+    // we only ever fetch from www.instacart.ca anyway.
+    cookies.push({ name, value, expires: oneYear, url: "https://www.instacart.ca/" });
   }
   return cookies;
 }

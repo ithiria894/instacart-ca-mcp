@@ -52,13 +52,10 @@ function parseCookies(raw) {
         const value = part.slice(eq + 1).trim();
         if (!name)
             continue;
-        if (name.startsWith("__Host-")) {
-            // __Host- cookies must be Secure + path "/" + NO domain → add by url.
-            cookies.push({ name, value, expires: oneYear, path: "/", secure: true, url: "https://www.instacart.ca/" });
-        }
-        else {
-            cookies.push({ name, value, expires: oneYear, path: "/", secure: true, domain: ".instacart.ca" });
-        }
+        // Playwright: a cookie is specified by EITHER url OR domain+path, never both.
+        // Add everything by url — Playwright derives domain/path/secure from it, and
+        // we only ever fetch from www.instacart.ca anyway.
+        cookies.push({ name, value, expires: oneYear, url: "https://www.instacart.ca/" });
     }
     return cookies;
 }
