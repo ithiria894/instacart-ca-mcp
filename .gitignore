@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+# The MCP's logged-in browser profile (never commit — contains session cookies)
+.instacart-ca-mcp/
+cookies.txt
