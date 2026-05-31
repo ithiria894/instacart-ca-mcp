@@ -111,9 +111,13 @@ export async function searchStore(shopId, query, first = 8) {
       const fwd = s.substring(m.index, m.index + 9000);
       const pm = fwd.match(/"priceString":"(\\$[\\d.]+)"/);
       if (!pm) continue;
+      // Instacart tags each item with its real department (e.g. "Meat &
+      // Seafood", "Pets", "Health & Body Care"). Capture it for category filtering.
+      const dm = fwd.match(/"departmentName":"([^"]{1,40})"/);
+      const department = dm ? dm[1] : null;
       if (seen.has(name)) continue;
       seen.add(name);
-      out.push({ name, price: pm[1] });
+      out.push({ name, price: pm[1], department });
       if (out.length >= 40) break;
     }
     return { ok: true, products: out };
@@ -121,16 +125,47 @@ export async function searchStore(shopId, query, first = 8) {
     const res = await evalInInstacartPage(fnBody);
     if (!res.ok)
         return { ok: false, products: [], error: res.error };
-    // Instacart pads results with "you might also like" recommendations that
-    // ignore the query (e.g. Nutella under "chicken thigh", makeup under "ground
-    // beef" at a store that doesn't sell it). Keep only products whose name
-    // actually matches the query. Unlike before we DON'T fall back to raw results
-    // when the filter empties them — a store that sells nothing relevant should
-    // return nothing, not noise.
-    const products = (res.value.products || [])
-        .filter((p) => isRelevant(query, p.name))
-        .slice(0, first);
+    // Instacart pads results with "you might also like" recommendations from
+    // other categories (dog food / makeup / jerky under "ground beef"). Use the
+    // server's own product taxonomy to keep only the query's dominant category.
+    const products = dominantCategoryFilter(res.value.products || [], query).slice(0, first);
     return { ok: true, products };
+}
+/**
+ * Keep only products in the query's dominant Instacart category.
+ *
+ * Each product carries a productCategoryId (e.g. 727 = ground beef). Real
+ * matches cluster in one category; the padded recommendations scatter across
+ * others or have none. We find the most common category among keyword-relevant
+ * products and keep items in that category (plus any keyword-relevant item that
+ * has no category id, so we never over-filter when the taxonomy is sparse).
+ *
+ * Falls back to plain keyword relevance when there's no clear category signal.
+ */
+export function dominantCategoryFilter(products, query) {
+    const relevant = products.filter((p) => isRelevant(query, p.name));
+    // Vote for the dominant category among keyword-relevant products only — that
+    // keeps a stray off-category item (jerky tagged "snacks") from winning.
+    const votes = new Map();
+    for (const p of relevant) {
+        if (p.category)
+            votes.set(p.category, (votes.get(p.category) || 0) + 1);
+    }
+    if (votes.size === 0)
+        return relevant; // no taxonomy signal → keyword only
+    let top = "";
+    let topN = 0;
+    for (const [cat, n] of votes) {
+        if (n > topN) {
+            top = cat;
+            topN = n;
+        }
+    }
+    // If the dominant category only has a single member and there are several
+    // categories, the signal is too weak to trust — fall back to keyword.
+    if (topN < 2 && votes.size > 1)
+        return relevant;
+    return relevant.filter((p) => p.category === top || !p.category);
 }
 const STOPWORDS = new Set([
     "the", "and", "with", "for", "pack", "value", "large", "small", "fresh",
