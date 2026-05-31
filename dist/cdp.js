@@ -71,6 +71,44 @@ export async function evalInInstacartPage(fnBody) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
 }
+/**
+ * Navigate to an instacart.ca path, let the SPA render, and pull
+ * `/collections/<slug>` links from the DOM. A raw fetch of a storefront returns
+ * no links (client-rendered), so getCategories uses this. Serialized through the
+ * singleton page — don't call concurrently with page evals.
+ */
+export async function collectionSlugsForPath(path) {
+    try {
+        const p = await getPage();
+        await p.goto("https://www.instacart.ca" + path, {
+            waitUntil: "domcontentloaded",
+            timeout: 60000,
+        });
+        // Heavy storefronts render the category nav lazily — wait for the first
+        // collections link to actually appear (fallback to a fixed wait).
+        await p
+            .waitForSelector('a[href*="/collections/"]', { timeout: 12000 })
+            .catch(() => { });
+        await p.waitForTimeout(1200);
+        const slugs = (await p.evaluate(() => {
+            const out = [];
+            const seen = {};
+            for (const a of Array.from(document.querySelectorAll('a[href*="/collections/"]'))) {
+                const href = a.getAttribute("href") || "";
+                const m = href.match(/\/collections\/([a-z0-9][a-z0-9-]{1,44})/);
+                if (m && !seen[m[1]]) {
+                    seen[m[1]] = 1;
+                    out.push(m[1]);
+                }
+            }
+            return out;
+        }));
+        return slugs;
+    }
+    catch {
+        return [];
+    }
+}
 /** Verify the owned browser session is logged in to instacart.ca. */
 export async function checkConnection() {
     return evalInInstacartPage(`

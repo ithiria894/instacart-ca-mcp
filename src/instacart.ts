@@ -3,23 +3,31 @@
  *
  * Everything goes through the site's internal persisted-GraphQL API, executed
  * from inside the logged-in instacart.ca page so cookies are sent automatically.
+ * See API.md for the full reverse-engineered operation reference.
  *
  * Persisted-query hashes change when Instacart deploys a new frontend bundle.
- * If a call starts returning errors, re-capture the hash from a live page
- * (Network tab → the SearchResultsPlacements request) and update HASHES below.
+ * If a call starts returning PersistedQueryNotSupported, re-capture the hash
+ * from a live page (Network tab) and update HASHES below.
  */
-import { evalInInstacartPage } from "./cdp.js";
+import { evalInInstacartPage, collectionSlugsForPath } from "./cdp.js";
 
-// --- Captured constants (2026-05-30, instacart.ca) -------------------------
+// --- Captured persisted-query hashes (instacart.ca, 2026-05-31) ------------
 export const HASHES = {
   SearchResultsPlacements:
     "84255489b672b9f4b28ef070ea4ee50f4a363ab2dfe48b5715df94cb19566c65",
+  CollectionProductsWithFeaturedProducts:
+    "f3193dacfeec83828016dc1b3c8af8e61c4470d3f466da2d5797b3f2c530369c",
+  ShopCollectionUnscoped:
+    "e4274fe3bbcb2464e3bca7be8368fdb702ca6b13b76d0042647d7470f44a8be7",
+  FlyerTopSavingsMasonryItems:
+    "119c16c75110c139d0d4704b93dcfd2f20686d216dfad02d499447fd6b6ba26e",
+  FlyerPersonalizedItems:
+    "f9348eadd66417e60350e840fb464bca6b110997123c767a0e76b2883757293e",
 };
 
-// shopId per retailer for Nicole's Vancouver zone (V6B6H4, zone 755), captured
-// live 2026-05-31 from the zone's available retailers. These are zone-specific;
-// a different delivery address may map to different ids. Duplicate branches of
-// the same chain are de-duped to one representative shopId.
+// Representative shopId per retailer for the Vancouver zone (V6B6H4, zone 755),
+// captured 2026-05-31. Zone-specific. This is a convenient hand-picked subset;
+// listStores() fetches the full live list (54 retailers) dynamically.
 export const STORES: Record<string, string> = {
   // mainstream grocery + warehouse
   Walmart: "9057",
@@ -60,6 +68,29 @@ export const STORES: Record<string, string> = {
   "Pet Food N More": "761252",
 };
 
+// Retailer slug per STORES name (for storefront/collection URLs). Kept explicit
+// because a chain can have several shopIds but one storefront slug, and the
+// shopId→slug reverse lookup via the live list can pick the wrong branch.
+export const STORE_SLUGS: Record<string, string> = {
+  Walmart: "walmart-canada",
+  Superstore: "real-canadian-superstore",
+  "Save-On-Foods": "save-on-foods",
+  Costco: "costco-canada",
+  "Costco Business Centre": "costco-business-centre",
+  "Wholesale Club": "real-canadian-wholesale-club",
+  "T&T": "t-t",
+  "Whole Foods": "whole-foods-ca",
+  IGA: "georgia-main-iga",
+  "Buy-Low Foods": "buy-low-foods",
+  "Choices Markets": "choices-market",
+  "Pricesmart Foods": "pricesmart-foods",
+  "Nesters Market": "nesters",
+  "Stong's Market": "stongs-market-canada",
+  "London Drugs": "london-drugs",
+  "Shoppers Drug Mart": "shoppers-drug-mart",
+  Rexall: "rexall",
+};
+
 export const ZONE = {
   postalCode: process.env.INSTACART_POSTAL || "V6B6H4",
   zoneId: process.env.INSTACART_ZONE || "755",
@@ -68,83 +99,237 @@ export const ZONE = {
 export interface Product {
   name: string;
   price: string;
+  /** Original price when the item is on sale (struck-through price). */
+  fullPrice?: string;
 }
 
+export interface Store {
+  shopId: string;
+  slug: string;
+  name: string;
+  retailerType?: string | null;
+}
+
+// --- shared JS, injected into the page --------------------------------------
+
 /**
- * Search a single store. Runs SearchResultsPlacements in the page and extracts
- * (name, price) pairs from the JSON. Parsing is intentionally tolerant — the
- * response is huge (~450KB) and we only need name+price.
+ * JS source (run inside the page) that parses Instacart's item nodes out of a
+ * raw GraphQL response string `s` into `out`. Shared by search / collection /
+ * flyer since they all return the same item shape:
+ *   "id":"items_<shop>-<pid>","itemLoadId":"<uuid>","name":"<NAME>" … "priceString":"$X"
+ * priceString sits ~5–6 KB after the name, so we scan a 9 KB window. `LIMIT` is
+ * substituted by the caller.
+ */
+function itemParserJs(limit: number): string {
+  return `
+    const out = []; const seen = new Set();
+    const re = /"id":"items_[\\d-]+","itemLoadId":"[^"]*","name":"([^"]{3,120})"/g;
+    let __m;
+    while ((__m = re.exec(s)) !== null) {
+      const name = __m[1];
+      const fwd = s.substring(__m.index, __m.index + 9000);
+      const pm = fwd.match(/"priceString":"(\\$[\\d.]+)"/);
+      if (!pm) continue;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const prod = { name, price: pm[1] };
+      const fpm = fwd.match(/"fullPriceString":"(\\$[\\d.]+)"/);
+      if (fpm && fpm[1] && fpm[1] !== pm[1]) prod.fullPrice = fpm[1];
+      out.push(prod);
+      if (out.length >= ${limit}) break;
+    }
+  `;
+}
+
+/** Build a page fetch to a persisted-query op and return its raw text status. */
+function gqlFetchJs(opName: string, hash: string, variablesExpr: string): string {
+  return `
+    const ext = { persistedQuery: { version: 1, sha256Hash: ${JSON.stringify(hash)} } };
+    const url = "/graphql?operationName=${opName}&variables=" +
+      encodeURIComponent(JSON.stringify(${variablesExpr})) +
+      "&extensions=" + encodeURIComponent(JSON.stringify(ext));
+    const r = await fetch(url, {
+      credentials: "include",
+      headers: { accept: "application/json", "content-type": "application/json", "x-client-identifier": "web" },
+    });
+    const status = r.status;
+    const s = await r.text();
+  `;
+}
+
+// --- 1. Search (fuzzy) ------------------------------------------------------
+
+/**
+ * Search a single store via SearchResultsPlacements. Fuzzy — results may include
+ * off-category recommendations, which isRelevant() then filters by keyword.
  */
 export async function searchStore(
   shopId: string,
   query: string,
   first = 8
 ): Promise<{ ok: boolean; products: Product[]; error?: string }> {
+  const variablesExpr = `{
+    action: null, query: ${JSON.stringify(query)}, pageViewId: "mcp-"+${JSON.stringify(shopId)}+"-"+Date.now(),
+    elevatedProductId: null, searchSource: "search", filters: [],
+    disableReformulation: false, disableLlm: false, forceInspiration: false,
+    orderBy: "bestMatch", clusterId: null, includeDebugInfo: false,
+    clusteringStrategy: null, contentManagementSearchParams: { itemGridColumnCount: 1 },
+    shopId: ${JSON.stringify(shopId)}, postalCode: ${JSON.stringify(ZONE.postalCode)},
+    zoneId: ${JSON.stringify(ZONE.zoneId)}, first: ${Math.max(first * 3, 20)}
+  }`;
   const fnBody = `
-    const hash = ${JSON.stringify(HASHES.SearchResultsPlacements)};
-    const variables = {
-      action: null, query: ${JSON.stringify(query)}, pageViewId: "mcp-"+${JSON.stringify(shopId)}+"-"+Date.now(),
-      elevatedProductId: null, searchSource: "search", filters: [],
-      disableReformulation: false, disableLlm: false, forceInspiration: false,
-      orderBy: "bestMatch", clusterId: null, includeDebugInfo: false,
-      clusteringStrategy: null, contentManagementSearchParams: { itemGridColumnCount: 1 },
-      shopId: ${JSON.stringify(shopId)}, postalCode: ${JSON.stringify(ZONE.postalCode)},
-      zoneId: ${JSON.stringify(ZONE.zoneId)}, first: ${Math.max(first * 3, 20)}
-    };
-    const ext = { persistedQuery: { version: 1, sha256Hash: hash } };
-    const url = "/graphql?operationName=SearchResultsPlacements&variables=" +
-      encodeURIComponent(JSON.stringify(variables)) +
-      "&extensions=" + encodeURIComponent(JSON.stringify(ext));
-    // The search endpoint enforces the x-client-identifier header (the
-    // CurrentUserFields probe does not); without it search returns HTTP 401.
-    const r = await fetch(url, {
-      credentials: "include",
-      headers: {
-        accept: "*/*",
-        "content-type": "application/json",
-        "x-client-identifier": "web",
-      },
-    });
-    if (r.status !== 200) return { ok: false, error: "HTTP " + r.status, products: [] };
-    // Use raw text (not r.json()) — the response is ~400KB; we only need name+price.
-    const s = await r.text();
-    if (s.indexOf('"errors"') !== -1 && s.indexOf('"data"') === -1) {
-      return { ok: false, error: s.slice(0, 200), products: [] };
-    }
-    // Each product card has shape (verified live 2026-05-31):
-    //   "id":"items_<shop>-<pid>","itemLoadId":"<uuid>","name":"<PRODUCT>","size":...
-    //   ... (~5-6KB later) ... "priceString":"$X"
-    // Anchor on the item node (id+itemLoadId+name adjacency, which uniquely marks
-    // a real product, not a UI token), then look forward up to 9KB for the first
-    // priceString within that card.
-    const out = []; const seen = new Set();
-    const re = /"id":"items_[\\d-]+","itemLoadId":"[^"]*","name":"([^"]{3,120})"/g;
-    let m;
-    while ((m = re.exec(s)) !== null) {
-      const name = m[1];
-      const fwd = s.substring(m.index, m.index + 9000);
-      const pm = fwd.match(/"priceString":"(\\$[\\d.]+)"/);
-      if (!pm) continue;
-      if (seen.has(name)) continue;
-      seen.add(name);
-      out.push({ name, price: pm[1] });
-      if (out.length >= 40) break;
-    }
+    ${gqlFetchJs("SearchResultsPlacements", HASHES.SearchResultsPlacements, variablesExpr)}
+    if (status !== 200) return { ok: false, error: "HTTP " + status, products: [] };
+    if (s.indexOf('"errors"') !== -1 && s.indexOf('"data"') === -1) return { ok: false, error: s.slice(0, 200), products: [] };
+    ${itemParserJs(40)}
     return { ok: true, products: out };
   `;
   const res = await evalInInstacartPage<{ ok: boolean; products: Product[]; error?: string }>(fnBody);
   if (!res.ok) return { ok: false, products: [], error: res.error };
-  // Instacart pads results with "you might also like" recommendations that
-  // ignore the query (e.g. Nutella under "chicken thigh", makeup under "ground
-  // beef" at a store that doesn't sell it). Keep only products whose name
-  // actually matches the query. Unlike before we DON'T fall back to raw results
-  // when the filter empties them — a store that sells nothing relevant should
-  // return nothing, not noise.
+  if (!res.value!.ok) return res.value!;
   const products = (res.value!.products || [])
     .filter((p) => isRelevant(query, p.name))
     .slice(0, first);
   return { ok: true, products };
 }
+
+// --- 2. Collections (clean category browse) ---------------------------------
+
+/**
+ * Browse a category collection at a store — CLEAN results (Instacart's own
+ * taxonomy, no cross-category noise). `slug` is that store's collection slug
+ * (e.g. "meat-and-seafood", "produce"); discover via getCategories().
+ */
+export async function browseCollection(
+  shopId: string,
+  slug: string,
+  first = 20
+): Promise<{ ok: boolean; products: Product[]; error?: string }> {
+  const variablesExpr = `{
+    shopId: ${JSON.stringify(shopId)}, slug: ${JSON.stringify(slug)}, filters: [],
+    pageViewId: "mcp-"+${JSON.stringify(shopId)}+"-"+Date.now(),
+    itemsDisplayType: "collections_all_items_grid", first: ${Math.max(first, 20)},
+    pageSource: "collections", postalCode: ${JSON.stringify(ZONE.postalCode)},
+    zoneId: ${JSON.stringify(ZONE.zoneId)}
+  }`;
+  const fnBody = `
+    ${gqlFetchJs("CollectionProductsWithFeaturedProducts", HASHES.CollectionProductsWithFeaturedProducts, variablesExpr)}
+    if (status !== 200) return { ok: false, error: "HTTP " + status, products: [] };
+    if (s.indexOf('"errors"') !== -1 && s.indexOf('"data"') === -1) return { ok: false, error: s.slice(0, 200), products: [] };
+    ${itemParserJs(first)}
+    return { ok: true, products: out };
+  `;
+  const res = await evalInInstacartPage<{ ok: boolean; products: Product[]; error?: string }>(fnBody);
+  if (!res.ok) return { ok: false, products: [], error: res.error };
+  return res.value!;
+}
+
+/**
+ * Discover a store's category slugs by reading its storefront. Slugs differ per
+ * store (Walmart uses "dairy"/"baked-goods", not "dairy-eggs"/"bread-bakery").
+ * Cached per retailerSlug for the process lifetime.
+ */
+const categoryCache = new Map<string, string[]>();
+export async function getCategories(retailerSlug: string): Promise<string[]> {
+  const cached = categoryCache.get(retailerSlug);
+  if (cached) return cached;
+  // The storefront is a SPA — a raw fetch has no collection links, so navigate
+  // the page and read the rendered DOM.
+  const slugs = await collectionSlugsForPath(`/store/${retailerSlug}/storefront`);
+  categoryCache.set(retailerSlug, slugs);
+  return slugs;
+}
+
+// --- 3. Store directory (full live list) ------------------------------------
+
+let storesCache: Store[] | null = null;
+
+/** Fetch every retailer available in the zone via ShopCollectionUnscoped. */
+export async function listStores(): Promise<Store[]> {
+  if (storesCache) return storesCache;
+  const variablesExpr = `{
+    postalCode: ${JSON.stringify(ZONE.postalCode)},
+    coordinates: { latitude: 49.2840545, longitude: -123.113445 },
+    addressId: "19137103560427752"
+  }`;
+  const fnBody = `
+    ${gqlFetchJs("ShopCollectionUnscoped", HASHES.ShopCollectionUnscoped, variablesExpr)}
+    if (status !== 200) return { ok: false, error: "HTTP " + status, stores: [] };
+    const out = []; const seen = {};
+    const re = /"id":"(\\d+)","retailer":\\{"id":"\\d+"/g;
+    let __m;
+    while ((__m = re.exec(s)) !== null) {
+      const shopId = __m[1];
+      if (seen[shopId]) continue;
+      const win = s.substring(__m.index, __m.index + 700);
+      const slug = (win.match(/"slug":"([^"]+)"/) || [])[1];
+      const name = (win.match(/"name":"([^"]+)"/) || [])[1];
+      const type = (win.match(/"retailerType":"([^"]+)"/) || [])[1];
+      if (slug && name) { seen[shopId] = 1; out.push({ shopId, slug, name, retailerType: type || null }); }
+    }
+    return { ok: true, stores: out };
+  `;
+  const res = await evalInInstacartPage<{ ok: boolean; stores: Store[]; error?: string }>(fnBody);
+  if (!res.ok || !res.value?.ok) return [];
+  // Decode & etc. that survived in raw-text parsing (e.g. "T&T").
+  const stores = (res.value.stores || []).map((st) => ({
+    ...st,
+    name: decodeUnicode(st.name),
+  }));
+  storesCache = stores;
+  return stores;
+}
+
+function decodeUnicode(s: string): string {
+  return s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+/** Look up a store's retailerSlug from its shopId via the live list. */
+export async function slugForShopId(shopId: string): Promise<string | null> {
+  const stores = await listStores();
+  return stores.find((s) => s.shopId === shopId)?.slug || null;
+}
+
+/** Authoritative shopId for a retailer slug, from the live zone list. */
+export async function shopIdForSlug(slug: string): Promise<string | null> {
+  const stores = await listStores();
+  return stores.find((s) => s.slug === slug)?.shopId || null;
+}
+
+/**
+ * Resolve a STORES name to its { slug, shopId }, preferring the live list (so
+ * shopIds stay correct as zones change) and falling back to the curated maps.
+ */
+export async function resolveStore(
+  name: string
+): Promise<{ slug: string | null; shopId: string | null }> {
+  const slug = STORE_SLUGS[name] || null;
+  let shopId: string | null = null;
+  if (slug) shopId = await shopIdForSlug(slug);
+  if (!shopId) shopId = STORES[name] || null;
+  return { slug, shopId };
+}
+
+// --- 4. Flyer / deals -------------------------------------------------------
+
+/** On-sale / top-savings items for a store (flyer). */
+export async function getDeals(
+  shopId: string,
+  first = 20
+): Promise<{ ok: boolean; products: Product[]; error?: string }> {
+  const variablesExpr = `{ shopId: ${JSON.stringify(shopId)}, source: "flyers_destination" }`;
+  const fnBody = `
+    ${gqlFetchJs("FlyerTopSavingsMasonryItems", HASHES.FlyerTopSavingsMasonryItems, variablesExpr)}
+    if (status !== 200) return { ok: false, error: "HTTP " + status, products: [] };
+    ${itemParserJs(first)}
+    return { ok: true, products: out };
+  `;
+  const res = await evalInInstacartPage<{ ok: boolean; products: Product[]; error?: string }>(fnBody);
+  if (!res.ok) return { ok: false, products: [], error: res.error };
+  return res.value!;
+}
+
+// --- relevance + synonyms ---------------------------------------------------
 
 const STOPWORDS = new Set([
   "the", "and", "with", "for", "pack", "value", "large", "small", "fresh",
@@ -152,9 +337,6 @@ const STOPWORDS = new Set([
   "medium", "family", "premium", "natural", "free", "range", "grade",
 ]);
 
-// Words that, when they appear as the ONLY query match, usually mean a wrong
-// category snuck in (jerky/snack/treat under a fresh-meat query, etc.). If a
-// product matches the query only via these, treat it as irrelevant.
 const NEGATIVE_HINTS: Record<string, string[]> = {
   beef: ["jerky", "snack", "stuffed", "bone", "hoof", "ear", "treat", "soup", "noodle", "burger", "meatball", "wrap", "teriyaki"],
   chicken: ["jerky", "snack", "stuffed", "bone", "treat", "soup", "noodle", "broth", "stock"],
@@ -164,9 +346,7 @@ const NEGATIVE_HINTS: Record<string, string[]> = {
 
 /**
  * A product is relevant if its name contains at least one meaningful query word
- * AND (when the query names a fresh-food category) isn't only matching via a
- * known wrong-category hint word. Words are lowercased, stopwords dropped, and a
- * trailing "s" stripped so "eggs" matches "egg".
+ * and isn't only matching via a known wrong-category hint word (jerky/treat/…).
  */
 export function isRelevant(query: string, name: string): boolean {
   const tokens = query
@@ -178,12 +358,8 @@ export function isRelevant(query: string, name: string): boolean {
   const lname = name.toLowerCase();
   const matched = tokens.filter((t) => lname.includes(t));
   if (!matched.length) return false;
-  // If every matched token has negative hints and the name hits one, reject.
   const hits = matched.flatMap((t) => NEGATIVE_HINTS[t] || []);
   if (hits.length && hits.some((h) => lname.includes(h))) {
-    // …unless the name ALSO contains a clean "<category>" word like "ground beef"
-    // / "beef steak" that isn't itself a hint. Allow if a non-hint food word
-    // sits right next to the category (heuristic: "ground" present).
     if (!/\bground\b|\bsteak\b|\bfillet\b|\bbreast\b|\bthigh\b|\bdrumstick\b/.test(lname)) {
       return false;
     }
@@ -191,12 +367,6 @@ export function isRelevant(query: string, name: string): boolean {
   return true;
 }
 
-/**
- * Synonym/translation expansion. instacart.ca is English, but its search is
- * fuzzy, so a few extra phrasings catch products a single term misses (e.g.
- * "minced beef" / "ground beef", or a store that lists fresh meat under a
- * different wording). Returned list is the original query first, then variants.
- */
 const SYNONYMS: Record<string, string[]> = {
   "ground beef": ["minced beef", "lean ground beef", "beef mince"],
   "ground pork": ["minced pork", "pork mince"],
@@ -216,32 +386,25 @@ const SYNONYMS: Record<string, string[]> = {
 export function expandQuery(query: string): string[] {
   const q = query.trim().toLowerCase();
   const variants = SYNONYMS[q] || [];
-  // de-dupe, keep original first
   return [query, ...variants.filter((v) => v.toLowerCase() !== q)];
 }
 
-/**
- * Search a store, trying the query plus synonyms until enough relevant products
- * come back. Stops as soon as a variant yields results, so common items cost a
- * single request; only sparse/oddly-worded stores fall through to variants.
- */
+/** Search a store, trying synonyms until results come back. */
 export async function searchStoreSmart(
   shopId: string,
   query: string,
   first = 6
 ): Promise<{ ok: boolean; products: Product[]; triedAll: boolean; error?: string }> {
   let lastErr: string | undefined;
-  const variants = expandQuery(query);
-  for (const v of variants) {
+  for (const v of expandQuery(query)) {
     const r = await searchStore(shopId, v, first);
-    if (!r.ok) {
-      lastErr = r.error;
-      continue;
-    }
+    if (!r.ok) { lastErr = r.error; continue; }
     if (r.products.length) return { ok: true, products: r.products, triedAll: false };
   }
   return { ok: true, products: [], triedAll: true, error: lastErr };
 }
+
+// --- concurrency + compare --------------------------------------------------
 
 /** Run an async fn over items with a bounded concurrency limit, preserving order. */
 async function mapLimit<T, R>(
@@ -261,38 +424,126 @@ async function mapLimit<T, R>(
   return results;
 }
 
+const priceOf = (s: string | undefined) =>
+  s ? parseFloat(s.replace(/[^\d.]/g, "")) : Infinity;
+
+export interface CompareResult {
+  store: string;
+  topMatch: Product | null;
+  allMatches: Product[];
+  /** How this store's result was obtained in category mode. */
+  via?: "category" | "search";
+  error?: string;
+}
+
 /**
- * Compare a query across stores. By default it hits every configured store; pass
- * a subset of store names to limit it. Stores are queried with bounded
- * concurrency (default 4) — sequential over ~30 stores would be too slow, and
- * unbounded parallelism risks tripping Instacart's rate limiter.
+ * Compare a query's price across stores, cheapest first.
+ *
+ * Two modes:
+ *  - default (search): fuzzy search + keyword relevance. Fast, some noise at
+ *    stores that don't carry the item.
+ *  - category mode (opts.category): for each store, find that store's collection
+ *    slug for the category, browse it (CLEAN), then keep query-matching items.
+ *    Slower (extra request to discover slugs) but no cross-category noise.
+ *
+ * opts.stores limits to a subset of STORES names; default is all of STORES.
  */
 export async function comparePrices(
   query: string,
-  storeNames?: string[],
-  concurrency = 4
-): Promise<{
-  query: string;
-  results: { store: string; topMatch: Product | null; allMatches: Product[]; error?: string }[];
-}> {
+  opts: { category?: string; stores?: string[]; concurrency?: number } = {}
+): Promise<{ query: string; mode: "search" | "category"; results: CompareResult[] }> {
+  const concurrency = opts.concurrency ?? 4;
   const entries = Object.entries(STORES).filter(
-    ([store]) => !storeNames || storeNames.includes(store)
+    ([store]) => !opts.stores || opts.stores.includes(store)
   );
-  const results = await mapLimit(entries, concurrency, async ([store, shopId]) => {
-    const r = await searchStoreSmart(shopId, query, 6);
-    return {
-      store,
-      topMatch: r.products[0] || null,
-      allMatches: r.products,
-      error: r.error,
-    };
+  const mode = opts.category ? "category" : "search";
+
+  // Category mode discovers each store's collection slugs via a page navigation.
+  // Navigations can't overlap with in-flight fetches on the shared page, so
+  // pre-warm the category cache SEQUENTIALLY first; afterwards the per-store
+  // browse calls are fetch-only and safe to run concurrently.
+  if (opts.category) {
+    for (const [store] of entries) {
+      const slug = STORE_SLUGS[store];
+      if (slug) await getCategories(slug);
+    }
+  }
+
+  const results = await mapLimit(entries, concurrency, async ([store, fallbackShopId]): Promise<CompareResult> => {
+    if (opts.category) {
+      const r = await compareViaCategory(store, opts.category, query);
+      return { store, topMatch: r.products[0] || null, allMatches: r.products, via: r.via, error: r.error };
+    }
+    const r = await searchStoreSmart(fallbackShopId, query, 6);
+    return { store, topMatch: r.products[0] || null, allMatches: r.products, error: r.error };
   });
-  // Stores that carry the item first, sorted by cheapest top match; empties last.
-  const priceOf = (s: string | undefined) => (s ? parseFloat(s.replace(/[^\d.]/g, "")) : Infinity);
+
   results.sort((a, b) => {
     const av = a.allMatches.length ? priceOf(a.topMatch?.price) : Infinity;
     const bv = b.allMatches.length ? priceOf(b.topMatch?.price) : Infinity;
     return av - bv;
   });
-  return { query, results };
+  return { query, mode, results };
+}
+
+/**
+ * Pick a store's collection slug matching the requested category, browse it, and
+ * keep items matching the query. Returns cheapest-first.
+ */
+async function compareViaCategory(
+  storeName: string,
+  category: string,
+  query: string
+): Promise<{ products: Product[]; error?: string; via?: "category" | "search" }> {
+  const { slug: retailerSlug, shopId } = await resolveStore(storeName);
+  if (!retailerSlug || !shopId) return { products: [], error: "cannot resolve " + storeName };
+  const slugs = await getCategories(retailerSlug);
+  const slug = pickCategorySlug(slugs, category);
+  // Some storefronts don't expose their category nav reliably (headless render).
+  // Fall back to fuzzy search so the store still gets a result rather than a
+  // blank — clean category results where possible, search otherwise.
+  if (!slug) {
+    const sr = await searchStoreSmart(shopId, query, 6);
+    return { products: sr.products, via: "search", error: sr.products.length ? undefined : "no '" + category + "' category and search empty" };
+  }
+  const r = await browseCollection(shopId, slug, 40);
+  if (!r.ok) return { products: [], error: r.error };
+  const matched = r.products
+    .filter((p) => isRelevant(query, p.name))
+    .sort((a, b) => priceOf(a.price) - priceOf(b.price));
+  // If the collection had nothing matching, also fall back to search.
+  if (!matched.length) {
+    const sr = await searchStoreSmart(shopId, query, 6);
+    if (sr.products.length) return { products: sr.products, via: "search" };
+  }
+  return { products: matched.slice(0, 6), via: "category" };
+}
+
+// Map a free-text category to one of a store's actual collection slugs. Tries
+// the canonical name, common aliases, then a loose token-overlap match.
+const CATEGORY_ALIASES: Record<string, string[]> = {
+  "meat-and-seafood": ["meat-and-seafood", "meat-seafood", "meat", "seafood", "fresh-meat"],
+  produce: ["produce", "fruits-vegetables", "fruits-and-vegetables", "fresh-produce"],
+  "dairy-eggs": ["dairy-eggs", "dairy", "dairy-and-eggs", "eggs"],
+  frozen: ["frozen", "frozen-foods"],
+  bakery: ["bakery", "baked-goods", "bread-bakery", "bread"],
+  beverages: ["beverages", "drinks"],
+  snacks: ["snacks", "snacks-and-candy", "snacks-candy", "candy"],
+  pantry: ["pantry", "canned-goods", "dry-goods-pasta", "condiments-sauces"],
+};
+
+export function pickCategorySlug(available: string[], category: string): string | null {
+  const want = category.toLowerCase().trim();
+  if (available.includes(want)) return want;
+  const aliases = CATEGORY_ALIASES[want] || [want];
+  for (const a of aliases) if (available.includes(a)) return a;
+  // loose: any available slug that shares a meaningful token with an alias
+  const wantTokens = new Set(aliases.flatMap((a) => a.split("-")).filter((t) => t.length >= 3));
+  let best: string | null = null;
+  let bestScore = 0;
+  for (const slug of available) {
+    const score = slug.split("-").filter((t) => wantTokens.has(t)).length;
+    if (score > bestScore) { best = slug; bestScore = score; }
+  }
+  return best;
 }
