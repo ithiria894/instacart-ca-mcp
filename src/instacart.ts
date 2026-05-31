@@ -53,7 +53,7 @@ export async function searchStore(
       orderBy: "bestMatch", clusterId: null, includeDebugInfo: false,
       clusteringStrategy: null, contentManagementSearchParams: { itemGridColumnCount: 1 },
       shopId: ${JSON.stringify(shopId)}, postalCode: ${JSON.stringify(ZONE.postalCode)},
-      zoneId: ${JSON.stringify(ZONE.zoneId)}, first: ${first}
+      zoneId: ${JSON.stringify(ZONE.zoneId)}, first: ${Math.max(first * 3, 20)}
     };
     const ext = { persistedQuery: { version: 1, sha256Hash: hash } };
     const url = "/graphql?operationName=SearchResultsPlacements&variables=" +
@@ -92,13 +92,40 @@ export async function searchStore(
       if (seen.has(name)) continue;
       seen.add(name);
       out.push({ name, price: pm[1] });
-      if (out.length >= ${first}) break;
+      if (out.length >= 40) break;
     }
     return { ok: true, products: out };
   `;
   const res = await evalInInstacartPage<{ ok: boolean; products: Product[]; error?: string }>(fnBody);
   if (!res.ok) return { ok: false, products: [], error: res.error };
-  return res.value!;
+  // Instacart pads results with "you might also like" recommendations that
+  // ignore the query (e.g. Nutella under "chicken thigh"). Keep only products
+  // whose name actually matches a meaningful query word, then trim to `first`.
+  const matches = (res.value!.products || []).filter((p) => isRelevant(query, p.name));
+  const products = (matches.length ? matches : res.value!.products).slice(0, first);
+  return { ok: true, products };
+}
+
+const STOPWORDS = new Set([
+  "the", "and", "with", "for", "pack", "value", "large", "small", "fresh",
+  "organic", "boneless", "skinless", "each",
+]);
+
+/**
+ * A product is relevant if its name contains at least one meaningful word from
+ * the query. Words are lowercased, stopwords dropped, and a trailing "s" is
+ * stripped so "eggs" matches "egg". If the query has no meaningful words
+ * (e.g. all stopwords), everything is considered relevant.
+ */
+export function isRelevant(query: string, name: string): boolean {
+  const tokens = query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && !STOPWORDS.has(t))
+    .map((t) => t.replace(/s$/, ""));
+  if (!tokens.length) return true;
+  const lname = name.toLowerCase();
+  return tokens.some((t) => lname.includes(t));
 }
 
 /** Compare the cheapest match for a query across all configured stores. */
