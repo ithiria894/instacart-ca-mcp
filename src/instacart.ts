@@ -16,12 +16,48 @@ export const HASHES = {
     "84255489b672b9f4b28ef070ea4ee50f4a363ab2dfe48b5715df94cb19566c65",
 };
 
-// shopId per retailer for Nicole's Vancouver zone (V6B6H4, zone 755).
-// These are zone-specific; a different delivery address may map to different ids.
+// shopId per retailer for Nicole's Vancouver zone (V6B6H4, zone 755), captured
+// live 2026-05-31 from the zone's available retailers. These are zone-specific;
+// a different delivery address may map to different ids. Duplicate branches of
+// the same chain are de-duped to one representative shopId.
 export const STORES: Record<string, string> = {
+  // mainstream grocery + warehouse
   Walmart: "9057",
   Superstore: "3702",
-  // "T&T": "????",  // TODO: capture T&T shopId from its storefront page
+  "Save-On-Foods": "25116",
+  Costco: "5780",
+  "Costco Business Centre": "4309",
+  "Wholesale Club": "464303",
+  "T&T": "42632",
+  "Whole Foods": "119201",
+  IGA: "267197",
+  "Marketplace IGA": "312093",
+  "Buy-Low Foods": "111933",
+  "Choices Markets": "56647",
+  "Pricesmart Foods": "17773",
+  "Nesters Market": "204339",
+  "Stong's Market": "401403",
+  "Donald's Market": "412045",
+  "Lous Market": "755358",
+  // specialty / ethnic / natural
+  "Persia Foods": "16705205",
+  "Bosa Foods": "367149",
+  "Famous Foods": "367110",
+  Fruiticana: "530231",
+  "Galloway's": "472015",
+  Spud: "479467",
+  "Pomme Natural Market": "481838",
+  "Aurora Natural": "551777",
+  "The Health Food": "499703",
+  "Eternity Natural Market": "538330",
+  "Bestie Natural Market": "767798",
+  "Cobs Bread": "357534",
+  // pharmacy
+  "London Drugs": "24392",
+  "Shoppers Drug Mart": "42116",
+  Rexall: "16656370",
+  // pet
+  "Pet Food N More": "761252",
 };
 
 export const ZONE = {
@@ -128,20 +164,49 @@ export function isRelevant(query: string, name: string): boolean {
   return tokens.some((t) => lname.includes(t));
 }
 
-/** Compare the cheapest match for a query across all configured stores. */
-export async function comparePrices(query: string): Promise<{
+/** Run an async fn over items with a bounded concurrency limit, preserving order. */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/**
+ * Compare a query across stores. By default it hits every configured store; pass
+ * a subset of store names to limit it. Stores are queried with bounded
+ * concurrency (default 4) — sequential over ~30 stores would be too slow, and
+ * unbounded parallelism risks tripping Instacart's rate limiter.
+ */
+export async function comparePrices(
+  query: string,
+  storeNames?: string[],
+  concurrency = 4
+): Promise<{
   query: string;
   results: { store: string; topMatch: Product | null; allMatches: Product[]; error?: string }[];
 }> {
-  const results = [];
-  for (const [store, shopId] of Object.entries(STORES)) {
+  const entries = Object.entries(STORES).filter(
+    ([store]) => !storeNames || storeNames.includes(store)
+  );
+  const results = await mapLimit(entries, concurrency, async ([store, shopId]) => {
     const r = await searchStore(shopId, query, 6);
-    results.push({
+    return {
       store,
       topMatch: r.products[0] || null,
       allMatches: r.products,
       error: r.error,
-    });
-  }
+    };
+  });
   return { query, results };
 }
